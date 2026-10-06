@@ -1,11 +1,13 @@
-import json
-from datetime import date, datetime, timezone
+from datetime import date
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from app import seed
 from app.db import connect
-from app.engines.fefo import consume_fefo, expire_lots
+from app.services import (
+    BadRequestError, ConflictError, NotFoundError,
+    do_consume, do_expire_sweep, do_inbound,
+)
 
 app = FastAPI(title="Pantryfifo", version="0.1.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -58,13 +60,10 @@ class LotIn(BaseModel):
 
 @app.post("/api/lots")
 def inbound(body: LotIn):
-    c = connect()
-    item = c.execute("SELECT id FROM items WHERE id=?", (body.item_id,)).fetchone()
-    if not item: c.close(); raise HTTPException(404, "item")
-    cur = c.execute(
-        "INSERT INTO lots(item_id,qty_in,qty_remain,expiry,status,data_quality) VALUES (?,?,?,?,?,?)",
-        (body.item_id, body.qty, body.qty, body.expiry, "on_shelf", "clean"))
-    c.commit(); lid = cur.lastrowid; c.close(); return {"id": lid}
+    try:
+        return do_inbound(body.item_id, body.qty, body.expiry)
+    except NotFoundError:
+        raise HTTPException(404, "item")
 
 class ConsumeIn(BaseModel):
     item_id: int
@@ -73,31 +72,16 @@ class ConsumeIn(BaseModel):
 
 @app.post("/api/consume")
 def consume(body: ConsumeIn):
-    c = connect()
-    lots = [dict(r) for r in c.execute(
-        "SELECT * FROM lots WHERE item_id=? AND status='on_shelf' AND qty_remain>0", (body.item_id,))]
-    result = consume_fefo(lots, body.qty)
-    if not result["ok"] and result["reason"] == "qty_non_positive":
-        c.close(); raise HTTPException(400, result["reason"])
-    if not result["ok"]:
-        c.close(); raise HTTPException(409, result)
-    for d in result["deductions"]:
-        c.execute("UPDATE lots SET qty_remain = qty_remain - ? WHERE id=?", (d["take"], d["lot_id"]))
-        rem = c.execute("SELECT qty_remain FROM lots WHERE id=?", (d["lot_id"],)).fetchone()["qty_remain"]
-        if rem <= 0:
-            c.execute("UPDATE lots SET status='consumed', qty_remain=0 WHERE id=?", (d["lot_id"],))
-    c.execute("INSERT INTO consumptions(note,result_json,created_at) VALUES (?,?,?)",
-              (body.note, json.dumps(result), datetime.now(timezone.utc).isoformat()))
-    c.commit(); c.close(); return result
+    try:
+        return do_consume(body.item_id, body.qty, body.note)
+    except BadRequestError as e:
+        raise HTTPException(400, str(e))
+    except ConflictError as e:
+        raise HTTPException(409, e.result)
 
 @app.post("/api/expire-sweep")
 def expire_sweep():
-    c = connect()
-    lots = [dict(r) for r in c.execute("SELECT * FROM lots WHERE status='on_shelf'")]
-    ids = expire_lots(lots, date.today().isoformat())
-    for i in ids:
-        c.execute("UPDATE lots SET status='expired' WHERE id=?", (i,))
-    c.commit(); c.close(); return {"expired_ids": ids}
+    return do_expire_sweep()
 
 @app.get("/api/settings")
 def settings():

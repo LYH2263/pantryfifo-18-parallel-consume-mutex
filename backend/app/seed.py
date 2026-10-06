@@ -9,6 +9,7 @@ def init_db():
       expiry TEXT, status TEXT, data_quality TEXT
     );
     CREATE TABLE IF NOT EXISTS consumptions(id INTEGER PRIMARY KEY AUTOINCREMENT, note TEXT, result_json TEXT, created_at TEXT);
+    CREATE TABLE IF NOT EXISTS consume_tokens(token TEXT PRIMARY KEY, result_json TEXT, created_at TEXT);
     CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT);
     """)
     if c.execute("SELECT COUNT(*) c FROM items").fetchone()["c"] == 0:
